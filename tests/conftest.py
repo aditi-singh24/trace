@@ -11,7 +11,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-import module4_auth.models  # noqa: F401  (register tables)
+import module2_core.models  # noqa: F401  (register tables)
+import module4_auth.models  # noqa: F401
 import module5_engine.models  # noqa: F401
 from main import app
 from module4_auth.models import User
@@ -21,14 +22,8 @@ from shared.db import Base, get_db
 
 PASSWORD = "correct-horse-battery"
 
-# Minimal stand-in for Module 2's participants table (only the columns Module 5 reads).
-PARTICIPANTS_DDL = """
-CREATE TABLE participants (
-    participant_id TEXT PRIMARY KEY,
-    site_id TEXT, hba1c_cat TEXT, therapy TEXT,
-    eligibility_status TEXT, consent_status TEXT, baseline_complete BOOLEAN
-)
-"""
+# The real `participants` table now comes from Module 2 (module2_core.models) through
+# Base.metadata.create_all, so the old stand-in table is gone.
 
 
 @pytest.fixture(autouse=True)
@@ -42,8 +37,6 @@ def _fresh_settings():
 def engine():
     eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(eng)
-    with eng.begin() as conn:
-        conn.execute(text(PARTICIPANTS_DDL))
     yield eng
     eng.dispose()
 
@@ -85,7 +78,9 @@ def auth(user, minutes=None):
 def add_participant(db, pid, site="SITE-01", cat="HIGH", therapy="STABLE",
                     eligibility="ELIGIBLE", consent="OBTAINED", baseline=True):
     db.execute(
-        text("INSERT INTO participants VALUES (:p, :s, :c, :t, :e, :cs, :b)"),
+        text("INSERT INTO participants (participant_id, site_id, hba1c_cat, therapy, "
+             "eligibility_status, consent_status, baseline_complete) "
+             "VALUES (:p, :s, :c, :t, :e, :cs, :b)"),
         {"p": pid, "s": site, "c": cat, "t": therapy, "e": eligibility, "cs": consent, "b": baseline},
     )
     db.commit()

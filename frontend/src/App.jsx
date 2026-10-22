@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { HashRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { MOCK, MOCK_USERS, SEED, SEED_VITALS, ELIGIBILITY, CHAINED_EVENT_TYPES, BLOCK_SIZE, api, setToken, can, armOf, hba1cCat, stratumKey, prereqs, makeEntry } from './lib.js'
+import { fromApiParticipant, fromApiAE, toApiAE, toVitals, prettyReason } from './adapters.js'
 import { Landing, Login, Denied, Dashboard, Patients, Randomize, Reports, Audit, Config } from './pages.jsx'
 
 const Ctx = createContext(null)
@@ -8,12 +9,16 @@ export const useStore = () => useContext(Ctx)
 
 function Provider({ children }) {
   const [user, setUser] = useState(null)
-  const [parts, setParts] = useState(SEED)
+  const [parts, setParts] = useState(MOCK ? SEED : [])
   const [aes, setAes] = useState([])
   const [chain, setChain] = useState([])
+  const [vitals, setVitals] = useState(MOCK ? SEED_VITALS : [])
+  const [dash, setDash] = useState(null) // Module 3 numbers (API mode only)
+  const [loadErr, setLoadErr] = useState('')
   const blocks = useRef({})
 
-  useEffect(() => { // seed the chain with the two existing randomizations
+  useEffect(() => { // mock mode only: seed the chain with the two existing randomizations
+    if (!MOCK) return
     ;(async () => {
       let c = [], prev = null
       for (const p of SEED.filter((x) => x.rand_no)) {
@@ -23,6 +28,34 @@ function Provider({ children }) {
       setChain(c)
     })()
   }, [])
+
+  // ---- API mode: load everything this role is allowed to see ----
+  const fetchAll = async (path) => {
+    let page = 1, items = [], total = 0
+    do {
+      const r = await api(`${path}${path.includes('?') ? '&' : '?'}page=${page}&page_size=100`)
+      items = items.concat(r.items); total = r.total; page += 1
+      if (!r.items.length) break
+    } while (items.length < total)
+    return items
+  }
+  const refresh = async (u = user) => {
+    if (MOCK || !u) return
+    try {
+      setLoadErr('')
+      const patient = u.role === 'PATIENT'
+      const [plist, aelist] = await Promise.all([
+        patient ? api(`/participants/${u.participant_id}`).then((p) => [p]) : fetchAll('/participants'),
+        fetchAll('/adverse-events'),
+      ])
+      setParts(plist.map(fromApiParticipant))
+      setAes(aelist.map(fromApiAE))
+      if (patient) setVitals(toVitals(await api(`/participants/${u.participant_id}/measurements`)))
+      else setDash(await api('/reports/enrollment'))
+      if (u.role === 'SUPERVISOR') setChain(await fetchAll('/audit/entries'))
+    } catch (e) { setLoadErr(e.message) }
+  }
+  useEffect(() => { refresh(user) }, [user])
 
   const login = async (username, password) => {
     if (MOCK) {
@@ -34,10 +67,31 @@ function Provider({ children }) {
     setToken(r.access_token)
     setUser(await api('/auth/me'))
   }
-  const logout = () => { setToken(null); setUser(null) }
+  const logout = () => {
+    setToken(null); setUser(null); setDash(null); setLoadErr('')
+    if (!MOCK) { setParts([]); setAes([]); setChain([]); setVitals([]) }
+  }
 
-  const addParticipant = (f) => {
+  const addParticipant = async (f) => {
     const age = Number(f.age), hba1c = Number(f.hba1c)
+    if (!MOCK) {
+      // real workflow: register -> consent -> screening -> (optional) week-0 baseline data
+      const created = await api('/participants', { method: 'POST', body: { site_id: f.site, age, sex: f.sex } })
+      const id = created.participant_id
+      let eligibility = 'PENDING_REVIEW', reason = null
+      try {
+        if (f.consent) {
+          await api(`/participants/${id}/consent`, { method: 'POST', body: {} })
+          const s = await api(`/participants/${id}/screening`, { method: 'POST', body: { t2dm_confirmed: !!f.t2dm, hba1c, therapy: f.therapy } })
+          eligibility = s.result; reason = prettyReason(s.reason)
+          if (f.baseline && s.result === 'ELIGIBLE')
+            await api(`/participants/${id}/measurements`, { method: 'POST', body: { visit_week: 0, hba1c, fasting_glucose: Number(f.glucose), weight_kg: Number(f.weight) } })
+        } else {
+          reason = 'Consent must be recorded before screening'
+        }
+      } finally { await refresh() }
+      return { id, eligibility, reason }
+    }
     let reason = null
     if (!f.t2dm) reason = 'Type 2 diabetes not confirmed'
     else if (age < ELIGIBILITY.minAge || age > ELIGIBILITY.maxAge) reason = `Age outside ${ELIGIBILITY.minAge} to ${ELIGIBILITY.maxAge}`
@@ -48,7 +102,13 @@ function Provider({ children }) {
     setParts([...parts, p])
     return p
   }
-  const addAE = (ae) => setAes([...aes, { ...ae, id: aes.length + 1, status: 'SUBMITTED', reported_at: new Date().toISOString().slice(0, 10) }])
+  const addAE = async (ae) => {
+    if (!MOCK) {
+      await api('/adverse-events', { method: 'POST', body: toApiAE(ae) })
+      return refresh()
+    }
+    setAes([...aes, { ...ae, id: aes.length + 1, status: 'SUBMITTED', reported_at: new Date().toISOString().slice(0, 10) }])
+  }
 
   const takeArm = (key) => {
     let b = blocks.current[key]
@@ -56,6 +116,11 @@ function Provider({ children }) {
     return b.pop()
   }
   const randomize = async (id) => {
+    if (!MOCK) {
+      const r = await api('/randomization', { method: 'POST', body: { participant_id: id } })
+      await refresh()
+      return { message: r.message || 'Randomization recorded', randomization_number: r.randomization_number, arm: r.arm ?? null }
+    }
     const p = parts.find((x) => x.id === id)
     if (!p || !prereqs(p).every(([, ok]) => ok)) throw new Error('Prerequisites not met')
     const rand_no = `RAND-${String(parts.filter((x) => x.rand_no).length + 1).padStart(4, '0')}`
@@ -65,7 +130,7 @@ function Provider({ children }) {
       setChain([...chain, await makeEntry(chain[chain.length - 1] || null, 'RANDOMIZED', user.id, { participant_id: id, randomization_number: rand_no, stratum_key: stratumKey(p) })])
     return { message: 'Randomization recorded', randomization_number: rand_no, arm: armOf(user, arm) }
   }
-  return <Ctx.Provider value={{ user, login, logout, parts, aes, chain, setChain, vitals: SEED_VITALS, addParticipant, addAE, randomize }}>{children}</Ctx.Provider>
+  return <Ctx.Provider value={{ user, login, logout, parts, aes, chain, setChain, vitals, dash, loadErr, refresh, addParticipant, addAE, randomize }}>{children}</Ctx.Provider>
 }
 
 /* ── Icons (inline SVG for zero deps) ── */
@@ -195,10 +260,11 @@ function Shell({ children }) {
 const Guard = ({ action, children }) => (can(useStore().user, action) ? children : <Denied />)
 
 function Routed() {
-  const { user } = useStore()
+  const { user, loadErr } = useStore()
   if (!user) return <Login />
   return (
     <Shell>
+      {loadErr && <div role="alert" className="bg-red-50 text-red-700 border-b border-red-200 text-xs px-4 py-2">Could not load data from the server: {loadErr}</div>}
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/patients" element={<Guard action="view_participants"><Patients /></Guard>} />
