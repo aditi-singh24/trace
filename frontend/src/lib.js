@@ -22,6 +22,19 @@ export async function api(path, opts = {}) {
   return data
 }
 
+// Server-side CSV export (Module 3). The server applies the blinding rule to the arm column.
+export async function downloadServerCsv() {
+  const res = await fetch(BASE + '/exports/participants.csv', { headers: { Authorization: `Bearer ${getToken()}` } })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error || 'Export failed')
+  }
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(await res.blob())
+  a.download = 'participants.csv'
+  a.click()
+}
+
 // Permission matrix (Section 6, Module 4). UI convenience only; the backend is the real gate.
 const C = 'COORDINATOR', S = 'SUPERVISOR', P = 'PATIENT'
 const MATRIX = {

@@ -11,6 +11,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from module4_auth.router import router as auth_router
 from module5_engine.router import router as engine_router
+from module2_core.router import router as core_router
+from module3_reports.router import router as reports_router
 from shared.config import get_settings
 
 app = FastAPI(title="TRACE Clinical Trial Management System", version="1.0")
@@ -40,4 +42,5 @@ async def validation_error(_: Request, exc: RequestValidationError):
 
 app.include_router(auth_router)      # Module 4
 app.include_router(engine_router)    # Module 5
-# --- Disha: include module2_core / module3_reports routers here ---
+app.include_router(core_router)      # Module 2 (Disha)
+app.include_router(reports_router)   # Module 3 (Disha)
