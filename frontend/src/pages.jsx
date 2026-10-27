@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useStore } from './App.jsx'
-import { can, canSeeArm, armOf, trialStatus, prereqs, stratumKey, verifyChain, ELIGIBILITY, TRIAL_WEEKS, VISIT_WEEKS } from './lib.js'
+import { MOCK, api, downloadServerCsv, can, canSeeArm, armOf, trialStatus, prereqs, stratumKey, verifyChain, ELIGIBILITY, TRIAL_WEEKS, VISIT_WEEKS } from './lib.js'
 
 /* ════════════════════════════════════════════
    SHARED PRIMITIVES
@@ -326,17 +326,18 @@ export function Denied() {
    ════════════════════════════════════════════ */
 
 export function Dashboard() {
-  const { user, parts, aes, chain } = useStore()
+  const { user, parts, aes, chain, dash } = useStore()
   if (user.role === 'PATIENT') return <PatientDash />
   const n = (f) => parts.filter(f).length
   const awaiting = parts.filter((p) => prereqs(p).every(([, ok]) => ok))
+  const ov = !MOCK && dash ? dash.overall : null // server-side numbers from Module 3
   const base = [
-    ['Registered', parts.length, false, 'All participants'],
-    ['Awaiting screening', n((p) => p.eligibility === 'PENDING_REVIEW'), false, 'Eligibility review pending'],
-    ['Eligible', n((p) => p.eligibility === 'ELIGIBLE'), false, 'Passed screening'],
-    ['Screen failures', n((p) => p.eligibility === 'SCREEN_FAILURE'), true, 'Did not pass criteria'],
-    ['Enrolled', n((p) => p.trial_status === 'ENROLLED'), false, 'Active in trial'],
-    ['Awaiting randomization', awaiting.length, false, 'Ready to randomize'],
+    ['Registered', ov ? ov.registered : parts.length, false, 'All participants'],
+    ['Awaiting screening', ov ? ov.awaiting_screening : n((p) => p.eligibility === 'PENDING_REVIEW'), false, 'Eligibility review pending'],
+    ['Eligible', ov ? ov.eligible : n((p) => p.eligibility === 'ELIGIBLE'), false, 'Passed screening'],
+    ['Screen failures', ov ? ov.screen_failures : n((p) => p.eligibility === 'SCREEN_FAILURE'), true, 'Did not pass criteria'],
+    ['Enrolled', ov ? ov.enrolled : n((p) => p.trial_status === 'ENROLLED'), false, 'Active in trial'],
+    ['Awaiting randomization', ov ? ov.awaiting_randomization : awaiting.length, false, 'Ready to randomize'],
   ]
   const sev = (s) => aes.filter((a) => a.severity === s).length
   return (
@@ -433,9 +434,10 @@ export function Dashboard() {
 function PatientDash() {
   const { user, parts, vitals, addAE } = useStore()
   const me = parts.find((p) => p.id === user.participant_id)
-  const [open, setOpen] = useState(false), [txt, setTxt] = useState(''), [sent, setSent] = useState(false)
+  const [open, setOpen] = useState(false), [txt, setTxt] = useState(''), [sent, setSent] = useState(false), [aeErr, setAeErr] = useState('')
+  if (!me) return <Page title="Loading…" sub="Fetching your record" breadcrumb="PATIENT PORTAL"><p className="text-xs text-slate-400 italic">Loading your record…</p></Page>
   const week = me.week ?? 0, next = VISIT_WEEKS.find((w) => w > week)
-  const last = vitals[vitals.length - 1], prev = vitals[vitals.length - 2]
+  const last = vitals[vitals.length - 1] || {}, prev = vitals[vitals.length - 2] || {}
   return (
     <Page
       title={me.id}
@@ -466,8 +468,8 @@ function PatientDash() {
             {[['HbA1c (%)', 'hba1c'], ['Fasting glucose (mg/dL)', 'glucose'], ['Weight (kg)', 'weight'], ['Blood pressure (mmHg)', 'bp']].map(([l, k]) => (
               <tr key={k} className="border-t border-trace-sage/40">
                 <td className="py-2 text-xs text-slate-500">{l}</td>
-                <td className="font-medium">{last[k]}</td>
-                <td className="text-slate-400">{prev[k]}</td>
+                <td className="font-medium">{last[k] ?? '—'}</td>
+                <td className="text-slate-400">{prev[k] ?? '—'}</td>
               </tr>
             ))}
           </tbody>
@@ -479,13 +481,14 @@ function PatientDash() {
             <textarea className="inp" rows={3} value={txt} onChange={(e) => setTxt(e.target.value)} />
           </Field>
           <div className="mt-3 flex gap-2">
-            <button className="btn" disabled={!txt} onClick={() => { addAE({ participant_id: me.id, severity: 'MILD', serious: false, relationship: 'NOT_RELATED', description: txt, onset: new Date().toISOString().slice(0, 10) }); setSent(true); setOpen(false); setTxt('') }}>
+            <button className="btn" disabled={!txt} onClick={async () => { try { setAeErr(''); await addAE({ participant_id: me.id, severity: 'MILD', serious: false, relationship: 'NOT_RELATED', description: txt, onset: new Date().toISOString().slice(0, 10) }); setSent(true); setOpen(false); setTxt('') } catch (e) { setSent(false); setAeErr(e.message) } }}>
               Send Report
             </button>
             <button className="btn2" onClick={() => setOpen(false)}>Cancel</button>
           </div>
         </div>
       )}
+      {aeErr && <p role="alert" className="mt-4 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">Could not send: {aeErr}</p>}
       {sent && <p className="mt-4 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">Report sent. Status: SUBMITTED.</p>}
     </Page>
   )
@@ -498,7 +501,7 @@ function PatientDash() {
 export function Patients() {
   const { user, parts, aes, addParticipant, addAE } = useStore()
   const [q, setQ] = useState(''), [sel, setSel] = useState(null), [mode, setMode] = useState(null)
-  const [f, setF] = useState({ site: 'SITE-01', age: '', sex: 'F', hba1c: '', therapy: 'STABLE', t2dm: true, consent: false, baseline: false })
+  const [f, setF] = useState({ site: 'SITE-01', age: '', sex: 'F', hba1c: '', therapy: 'STABLE', t2dm: true, consent: false, baseline: false, glucose: '', weight: '' })
   const [ae, setAe] = useState({ onset: '', severity: 'MILD', serious: false, relationship: 'NOT_RELATED', description: '' })
   const [msg, setMsg] = useState('')
   const p = parts.find((x) => x.id === sel)
@@ -567,11 +570,17 @@ export function Patients() {
               <span className="text-xs">Baseline data complete</span>
             </label>
           </div>
+          {!MOCK && f.baseline && (
+            <div className="grid sm:grid-cols-4 gap-3 mb-4">
+              <Field label="Fasting glucose (mg/dL)"><input className="inp" type="number" value={f.glucose} onChange={set('glucose')} /></Field>
+              <Field label="Weight (kg)"><input className="inp" type="number" step="0.1" value={f.weight} onChange={set('weight')} /></Field>
+            </div>
+          )}
           <div className="reg-banner mb-4">
             ⚠ Eligibility rules: age {ELIGIBILITY.minAge}–{ELIGIBILITY.maxAge}, HbA1c {ELIGIBILITY.minHba1c}–{ELIGIBILITY.maxHba1c}%. Final criteria from the protocol.
           </div>
           <div className="flex gap-2">
-            <button className="btn" disabled={!f.age || !f.hba1c} onClick={() => { const r = addParticipant(f); setMsg(`${r.id}: ${r.eligibility}${r.reason ? ` (${r.reason})` : ''}`); setMode(null) }}>
+            <button className="btn" disabled={!f.age || !f.hba1c || (!MOCK && f.baseline && (!f.glucose || !f.weight))} onClick={async () => { try { const r = await addParticipant(f); setMsg(`${r.id}: ${r.eligibility}${r.reason ? ` (${r.reason})` : ''}`); setMode(null) } catch (e) { setMsg(`Could not save: ${e.message}`) } }}>
               Save &amp; Screen
             </button>
             <button className="btn2" onClick={() => setMode(null)}>Cancel</button>
@@ -608,7 +617,7 @@ export function Patients() {
               placeholder="Provide a detailed clinical description of the adverse event, symptomatic progression, vitals and baseline shifts…" />
           </Field>
           <div className="mt-3 flex gap-2">
-            <button className="btn" disabled={!ae.onset || !ae.description} onClick={() => { addAE({ ...ae, participant_id: p.id }); setMsg(`Adverse event saved for ${p.id}. Status: SUBMITTED.`); setMode(null) }}>
+            <button className="btn" disabled={!ae.onset || !ae.description} onClick={async () => { try { await addAE({ ...ae, participant_id: p.id }); setMsg(`Adverse event saved for ${p.id}. Status: SUBMITTED.`); setMode(null) } catch (e) { setMsg(`Could not save: ${e.message}`) } }}>
               Save Adverse Event
             </button>
             <button className="btn2" onClick={() => setMode(null)}>Cancel</button>
@@ -657,8 +666,8 @@ export function Patients() {
               <dl className="space-y-2 text-xs">
                 {[
                   ['Age / Sex', `${p.age}, ${p.sex}`],
-                  ['Baseline HbA1c', `${p.hba1c}% (${p.hba1c_cat})`],
-                  ['Therapy', p.therapy],
+                  ['Baseline HbA1c', p.hba1c != null ? `${p.hba1c}% (${p.hba1c_cat})` : '—'],
+                  ['Therapy', p.therapy ?? '—'],
                   ['Consent', p.consent],
                   ['Baseline complete', p.baseline_complete ? 'Yes' : 'No'],
                   ['Stratum', p.id],
@@ -766,7 +775,8 @@ export function Reports() {
   const { user, parts, aes } = useStore()
   const unb = canSeeArm(user)
   const strata = [...new Set(parts.filter((p) => p.rand_no).map(stratumKey))]
-  const csv = () => {
+  const csv = async () => {
+    if (!MOCK) { try { await downloadServerCsv() } catch (e) { window.alert(e.message) } return }
     const head = ['participant_id', 'site_id', 'hba1c_cat', 'therapy', 'eligibility_status', 'trial_status', 'consent_status', 'randomization_number', 'arm']
     const lines = parts.map((p) => [p.id, p.site, p.hba1c_cat, p.therapy, p.eligibility, trialStatus(p), p.consent, p.rand_no || '', armOf(user, p.arm) || ''].join(','))
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([[head.join(','), ...lines].join('\n')], { type: 'text/csv' })); a.download = 'participants.csv'; a.click()
@@ -834,7 +844,10 @@ export function Reports() {
 export function Audit() {
   const { chain, setChain } = useStore()
   const [status, setStatus] = useState(null)
-  const verify = async () => setStatus(await verifyChain(chain))
+  const verify = async () => {
+    if (MOCK) return setStatus(await verifyChain(chain))
+    try { const r = await api('/audit/verify'); setStatus({ ok: r.ok, broken_seq: r.first_broken_seq }) } catch (e) { setStatus({ ok: false, broken_seq: e.message }) }
+  }
   const tamper = () => { if (chain.length) { const c = [...chain]; c[0] = { ...c[0], actor_id: 'U-9999' }; setChain(c); setStatus(null) } }
   return (
     <Page
@@ -843,7 +856,7 @@ export function Audit() {
       breadcrumb="AUDIT DOSSIER"
       bar={
         <>
-          <button className="btn2" onClick={tamper}>Tamper with entry 1 (demo)</button>
+          {MOCK && <button className="btn2" onClick={tamper}>Tamper with entry 1 (demo)</button>}
           <button className="btn" onClick={verify}>Verify Chain</button>
         </>
       }
